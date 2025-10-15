@@ -1,0 +1,83 @@
+services:
+  # Dagster Daemon - Runs schedules, sensors, and background tasks
+  dagster-daemon:
+    build:
+      context: ./pipelines/dagster
+      dockerfile: Dockerfile
+    container_name: dagster-daemon
+    restart: unless-stopped
+    environment:
+      # Supabase Database Connection
+      SUPABASE_DB_HOST: ${SUPABASE_DB_HOST}
+      SUPABASE_DB_PORT: ${SUPABASE_DB_PORT:-6543}
+      SUPABASE_DB_NAME: ${SUPABASE_DB_NAME:-postgres}
+      SUPABASE_DB_USER: ${SUPABASE_DB_USER}
+      SUPABASE_DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
+      
+      # Google Cloud Storage Configuration
+      GCS_BUCKET_NAME: ${GCS_BUCKET_NAME}
+      GCS_DATASET_PATH: ${GCS_DATASET_PATH:-dataset.csv_(DS_Senior).csv}
+      GCS_MAPPINGS_PATH: ${GCS_MAPPINGS_PATH:-mappings.json_(DS_Senior).json}
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/dagster/app/gcs-credentials.json
+      
+      # Dagster Configuration
+      DAGSTER_HOME: /opt/dagster/dagster_home
+
+      # OpenAI Configuration
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_TRANSLATION_MODEL: ${OPENAI_TRANSLATION_MODEL}
+      TRANSLATION_BATCH_SIZE: ${TRANSLATION_BATCH_SIZE}
+    volumes:
+      - ./pipelines/dagster:/opt/dagster/app
+      - ${GCS_CREDENTIALS_FILE:-./gcs-credentials.json}:/opt/dagster/app/gcs-credentials.json:ro
+      - dagster-data:/opt/dagster/dagster_home
+    command: dagster-daemon run -w workspace.yaml
+    networks:
+      - dagster-network
+
+  # Dagster Webserver - UI for monitoring and managing pipelines
+  dagster-webserver:
+    build:
+      context: ./pipelines/dagster
+      dockerfile: Dockerfile
+    container_name: dagster-webserver
+    restart: unless-stopped
+    ports:
+      - "${DAGSTER_PORT:-3001}:3000"
+    environment:
+      # Supabase Database Connection
+      SUPABASE_DB_HOST: ${SUPABASE_DB_HOST}
+      SUPABASE_DB_PORT: ${SUPABASE_DB_PORT:-6543}
+      SUPABASE_DB_NAME: ${SUPABASE_DB_NAME:-postgres}
+      SUPABASE_DB_USER: ${SUPABASE_DB_USER}
+      SUPABASE_DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
+      
+      # Google Cloud Storage Configuration
+      GCS_BUCKET_NAME: ${GCS_BUCKET_NAME}
+      GCS_DATASET_PATH: ${GCS_DATASET_PATH:-dataset.csv_(DS_Senior).csv}
+      GCS_MAPPINGS_PATH: ${GCS_MAPPINGS_PATH:-mappings.json_(DS_Senior).json}
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/dagster/app/gcs-credentials.json
+      
+      # Dagster Configuration
+      DAGSTER_HOME: /opt/dagster/dagster_home
+
+      # OpenAI Configuration
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_TRANSLATION_MODEL: ${OPENAI_TRANSLATION_MODEL}
+      TRANSLATION_BATCH_SIZE: ${TRANSLATION_BATCH_SIZE}
+    volumes:
+      - ./pipelines/dagster:/opt/dagster/app
+      - ${GCS_CREDENTIALS_FILE:-./gcs-credentials.json}:/opt/dagster/app/gcs-credentials.json:ro
+      - dagster-data:/opt/dagster/dagster_home
+    command: dagster-webserver -h 0.0.0.0 -p 3000 -w workspace.yaml
+    networks:
+      - dagster-network
+    depends_on:
+      - dagster-daemon
+
+networks:
+  dagster-network:
+    driver: bridge
+
+volumes:
+  dagster-data:

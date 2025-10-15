@@ -205,3 +205,42 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ============================================================================
+# Tourism Pipeline Specific
+# ============================================================================
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Terraform
+infra/terraform/*.tfvars
+!infra/terraform/*.tfvars.example
+infra/terraform/.terraform/
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.*
+infra/terraform/.terraform.lock.hcl
+
+# Credentials
+gcs-credentials.json
+*.key
+*.pem
+secrets/
+credentials/
+
+# Docker
+docker-compose.override.yml
+
+# Backups
+backups/
+*.sql
+*.dump
+
+# Dagster
+dagster_home/
+.dagster_home/
+
+# Logs
+logs/
