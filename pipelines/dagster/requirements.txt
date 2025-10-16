@@ -2,9 +2,11 @@
 dagster==1.5.10
 dagster-webserver==1.5.10
 dagster-postgres==0.21.10
+dagster-graphql==1.5.10
 
-# Google Cloud Storage
-google-cloud-storage==2.10.0
+# Google Cloud
+google-cloud-storage
+google-cloud-pubsub
 
 # Database
 psycopg2-binary==2.9.9
