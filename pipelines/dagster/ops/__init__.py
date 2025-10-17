@@ -21,6 +21,12 @@ from ops.translation import (
     translate_reviews,
     update_translated_reviews,
 )
+from ops.aspect_extraction import (
+    load_reviews_for_aspects,
+    extract_aspects_batch_via_api,
+    extract_aspects_batch_via_pyabsa,
+    upsert_review_aspects,
+)
 
 __all__ = [
     # Ingestion ops
@@ -39,4 +45,9 @@ __all__ = [
     "load_reviews_for_translation",
     "translate_reviews",
     "update_translated_reviews",
+    # Aspect ops
+    "load_reviews_for_aspects",
+    "extract_aspects_batch_via_api",
+    "extract_aspects_batch_via_pyabsa",
+    "upsert_review_aspects",
 ]

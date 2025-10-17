@@ -27,6 +27,18 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_TRANSLATION_MODEL: ${OPENAI_TRANSLATION_MODEL}
       TRANSLATION_BATCH_SIZE: ${TRANSLATION_BATCH_SIZE}
+
+      # Aspect Extraction (LLM) API
+      ASPECT_API_URL: ${ASPECT_API_URL}
+      ASPECT_API_KEY: ${ASPECT_API_KEY}
+      ASPECT_API_TIMEOUT: ${ASPECT_API_TIMEOUT:-300}
+      ASPECT_REQUEST_MODEL: ${ASPECT_REQUEST_MODEL:-gpt-5-mini}
+      ASPECT_PROMPT_VERSION: ${ASPECT_PROMPT_VERSION:-v1}
+
+      # PyABSA Aspect Extraction API
+      PYABSA_API_URL: ${PYABSA_API_URL}
+      PYABSA_API_KEY: ${PYABSA_API_KEY}
+      PYABSA_API_TIMEOUT: ${PYABSA_API_TIMEOUT:-60}
     volumes:
       - ./pipelines/dagster:/opt/dagster/app
       - ${GCS_CREDENTIALS_FILE:-./gcs-credentials.json}:/opt/dagster/app/gcs-credentials.json:ro
@@ -65,6 +77,18 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_TRANSLATION_MODEL: ${OPENAI_TRANSLATION_MODEL}
       TRANSLATION_BATCH_SIZE: ${TRANSLATION_BATCH_SIZE}
+
+      # Aspect Extraction (LLM) API
+      ASPECT_API_URL: ${ASPECT_API_URL}
+      ASPECT_API_KEY: ${ASPECT_API_KEY}
+      ASPECT_API_TIMEOUT: ${ASPECT_API_TIMEOUT:-60}
+      ASPECT_REQUEST_MODEL: ${ASPECT_REQUEST_MODEL:-gpt-5-mini}
+      ASPECT_PROMPT_VERSION: ${ASPECT_PROMPT_VERSION:-v1}
+
+      # PyABSA Aspect Extraction API
+      PYABSA_API_URL: ${PYABSA_API_URL}
+      PYABSA_API_KEY: ${PYABSA_API_KEY}
+      PYABSA_API_TIMEOUT: ${PYABSA_API_TIMEOUT:-60}
     volumes:
       - ./pipelines/dagster:/opt/dagster/app
       - ${GCS_CREDENTIALS_FILE:-./gcs-credentials.json}:/opt/dagster/app/gcs-credentials.json:ro

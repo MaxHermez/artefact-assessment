@@ -10,13 +10,21 @@ from google.cloud import pubsub_v1
 
 from dagster import (
     sensor,
+    run_status_sensor,
+    DagsterRunStatus,
     RunRequest,
     SkipReason,
     SensorEvaluationContext,
     get_dagster_logger,
 )
 
-from jobs import ingestion_pipeline, parsing_pipeline
+from jobs import (
+    ingestion_pipeline,
+    parsing_pipeline,
+    translation_pipeline,
+    aspect_extraction_pipeline,
+    pyabsa_aspect_extraction_pipeline,
+)
 
 
 def get_env_specific_subscription() -> str:
@@ -235,3 +243,49 @@ def gcs_parsing_sensor(context: SensorEvaluationContext):
     except Exception as e:
         logger.error(f"Error in GCS sensor: {str(e)}")
         yield SkipReason(f"Error polling GCS events: {str(e)}")
+
+
+# =========================
+# Run Status Chain Sensors
+# =========================
+
+@run_status_sensor(run_status=DagsterRunStatus.SUCCESS, name="ingestion_to_parsing", minimum_interval_seconds=30)
+def ingestion_to_parsing(context, dagster_run):
+    """Trigger parsing_pipeline when ingestion_pipeline succeeds."""
+    if dagster_run.job_name != "ingestion_pipeline":
+        return
+    tags = {
+        "trigger": "chain",
+        "parent_run_id": dagster_run.run_id,
+        "parent_job": dagster_run.job_name,
+    }
+    yield RunRequest(job_name="parsing_pipeline", run_key=f"parsing_after_{dagster_run.run_id}", tags=tags)
+
+
+@run_status_sensor(run_status=DagsterRunStatus.SUCCESS, name="parsing_to_translation", minimum_interval_seconds=30)
+def parsing_to_translation(context, dagster_run):
+    """Trigger translation_pipeline when parsing_pipeline succeeds."""
+    if dagster_run.job_name != "parsing_pipeline":
+        return
+    tags = {
+        "trigger": "chain",
+        "parent_run_id": dagster_run.run_id,
+        "parent_job": dagster_run.job_name,
+    }
+    yield RunRequest(job_name="translation_pipeline", run_key=f"translation_after_{dagster_run.run_id}", tags=tags)
+
+
+@run_status_sensor(run_status=DagsterRunStatus.SUCCESS, name="translation_to_aspects", minimum_interval_seconds=30)
+def translation_to_aspects(context, dagster_run):
+    """Trigger both aspect extraction pipelines when translation_pipeline succeeds."""
+    if dagster_run.job_name != "translation_pipeline":
+        return
+    tags = {
+        "trigger": "chain",
+        "parent_run_id": dagster_run.run_id,
+        "parent_job": dagster_run.job_name,
+    }
+    # Trigger LLM-based aspects
+    yield RunRequest(job_name="aspect_extraction_pipeline", run_key=f"llm_aspects_after_{dagster_run.run_id}", tags=tags)
+    # Trigger PyABSA-based aspects
+    yield RunRequest(job_name="pyabsa_aspect_extraction_pipeline", run_key=f"pyabsa_aspects_after_{dagster_run.run_id}", tags=tags)

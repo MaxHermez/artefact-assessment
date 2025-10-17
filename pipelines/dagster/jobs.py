@@ -19,6 +19,11 @@ from ops import (
     load_reviews_for_translation,
     translate_reviews,
     update_translated_reviews,
+    # Aspect Extraction
+    load_reviews_for_aspects,
+    extract_aspects_batch_via_api,
+    extract_aspects_batch_via_pyabsa,
+    upsert_review_aspects,
 )
 
 
@@ -100,7 +105,7 @@ def parsing_pipeline():
             },
             "translate_reviews": {
                 "config": {
-                    "model": os.getenv('OPENAI_TRANSLATION_MODEL', 'gpt-4o-mini'),
+                    "model": os.getenv('OPENAI_TRANSLATION_MODEL', 'gpt-5-mini'),
                 }
             },
         }
@@ -118,3 +123,59 @@ def translation_pipeline():
     review_batches = load_reviews_for_translation()
     translated_batches = review_batches.map(translate_reviews)
     translated_batches.map(update_translated_reviews)
+
+
+@job(
+    description="Aspect extraction pipeline: call external API and persist aspects",
+)
+def aspect_extraction_pipeline():
+    """
+    Aspect extraction pipeline that:
+    1. Loads reviews missing aspects (uses translated_content if present else content)
+    2. Calls the external Aspect API for each batch
+    3. Persists extracted aspects into review_aspect_extractions table
+    """
+    review_batches = load_reviews_for_aspects()
+    api_results = review_batches.map(extract_aspects_batch_via_api)
+    api_results.map(upsert_review_aspects)
+
+
+@job(
+    description="Aspect extraction pipeline (PyABSA): call PyABSA batch API and persist aspects",
+)
+def pyabsa_aspect_extraction_pipeline():
+    """
+    Aspect extraction pipeline (PyABSA) that:
+    1. Loads reviews missing aspects (uses translated_content if present else content)
+    2. Calls the PyABSA Aspect API for each batch (batch endpoint)
+    3. Persists extracted aspects into review_aspect_extractions table
+    """
+    review_batches = load_reviews_for_aspects()
+    api_results = review_batches.map(extract_aspects_batch_via_pyabsa)
+    api_results.map(upsert_review_aspects)
+
+
+@job(
+    description="Retry aspect extraction for unprocessed reviews (smaller batches, rate-limited)",
+    config={
+        "ops": {
+            "load_reviews_for_aspects": {
+                "config": {
+                    "batch_size": 100,
+                }
+            },
+        }
+    }
+)
+def aspect_extraction_retry_pipeline():
+    """
+    Retry pipeline for aspect extraction with smaller batches and built-in rate limiting.
+    Use this when the main pipeline fails partway through due to Supabase rate limits.
+    
+    Automatically identifies and processes only reviews that don't have aspects yet.
+    Uses smaller batch size (50) and 1-second delays to respect free tier limits.
+    """
+    review_batches = load_reviews_for_aspects()
+    api_results = review_batches.map(extract_aspects_batch_via_api)
+    api_results.map(upsert_review_aspects)
+

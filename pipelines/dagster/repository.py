@@ -10,8 +10,17 @@ from jobs import (
     ingestion_pipeline,
     parsing_pipeline,
     translation_pipeline,
+    aspect_extraction_pipeline,
+    pyabsa_aspect_extraction_pipeline,
+    aspect_extraction_retry_pipeline,
 )
-from sensors import gcs_ingestion_sensor, gcs_parsing_sensor
+from sensors import (
+    gcs_ingestion_sensor,
+    gcs_parsing_sensor,
+    ingestion_to_parsing,
+    parsing_to_translation,
+    translation_to_aspects,
+)
 from config import ensure_gcs_notifications_setup
 
 # Auto-setup GCS notifications when repository loads (idempotent)
@@ -36,6 +45,12 @@ def tourism_data_repository():
         ingestion_pipeline,
         parsing_pipeline,
         translation_pipeline,
+        aspect_extraction_pipeline,
+        pyabsa_aspect_extraction_pipeline,
+        aspect_extraction_retry_pipeline,
         gcs_ingestion_sensor,
         gcs_parsing_sensor,
+        ingestion_to_parsing,
+        parsing_to_translation,
+        translation_to_aspects,
     ]
