@@ -26,6 +26,9 @@ from ops.aspect_extraction import (
     extract_aspects_batch_via_api,
     extract_aspects_batch_via_pyabsa,
     upsert_review_aspects,
+    generate_batch_numbers,
+    process_batch_end_to_end,
+    process_batch_end_to_end_pyabsa,
 )
 
 __all__ = [
@@ -50,4 +53,7 @@ __all__ = [
     "extract_aspects_batch_via_api",
     "extract_aspects_batch_via_pyabsa",
     "upsert_review_aspects",
+    "generate_batch_numbers",
+    "process_batch_end_to_end",
+    "process_batch_end_to_end_pyabsa",
 ]

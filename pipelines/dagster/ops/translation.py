@@ -253,10 +253,21 @@ def update_translated_reviews(context: OpExecutionContext, translated_reviews: L
         context.log_event(
             AssetMaterialization(
                 asset_key="reviews_translated",
-                description="Updated reviews with English translations",
+                description="Updated reviews with translations",
                 metadata={
                     "reviews_updated": updated_count,
-                    "batch_size": 100,
+                    "batch_size": 1000,
+                }
+            )
+        )
+        
+        # Materialize the reviews_table asset
+        context.log_event(
+            AssetMaterialization(
+                asset_key=["supabase", "reviews_table"],
+                description="Reviews table updated by translation pipeline",
+                metadata={
+                    "rows_updated": updated_count,
                 }
             )
         )

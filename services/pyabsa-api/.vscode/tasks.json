@@ -1,0 +1,17 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Cloud Build pyabsa-api",
+			"type": "shell",
+			"command": "gcloud",
+			"args": [
+				"builds",
+				"submit",
+				"--tag",
+				"$env:REGION-docker.pkg.dev/$env:GCP_PROJECT_ID/$env:SERVICE_NAME/$env:SERVICE_NAME:latest",
+				"."
+			]
+		}
+	]
+}

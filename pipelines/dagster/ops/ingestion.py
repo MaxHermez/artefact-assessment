@@ -177,6 +177,17 @@ def upsert_destinations(context: OpExecutionContext, mappings: Dict) -> Dict[str
             )
         )
         
+        # Materialize the destinations_table asset
+        context.log_event(
+            AssetMaterialization(
+                asset_key=["supabase", "destinations_table"],
+                description="Destinations table updated by parsing pipeline",
+                metadata={
+                    "rows_upserted": len(destination_map),
+                }
+            )
+        )
+        
     except Exception as e:
         conn.rollback()
         logger.error(f"Failed to upsert destinations: {str(e)}")
@@ -238,6 +249,17 @@ def upsert_offerings(context: OpExecutionContext, mappings: Dict) -> Dict[str, i
                 metadata={
                     "unique_offerings": len(offering_map),
                     "offerings_list": sorted(offering_map.keys())[:10],  # First 10 for preview
+                }
+            )
+        )
+        
+        # Materialize the offerings_table asset
+        context.log_event(
+            AssetMaterialization(
+                asset_key=["supabase", "offerings_table"],
+                description="Offerings table updated by parsing pipeline",
+                metadata={
+                    "rows_upserted": len(offering_map),
                 }
             )
         )
@@ -379,6 +401,17 @@ def load_reviews_to_supabase(context: OpExecutionContext, reviews: List[Dict]) -
                 metadata={
                     "reviews_loaded": inserted_count,
                     "batch_size": 1000,
+                }
+            )
+        )
+        
+        # Materialize the reviews_table asset
+        context.log_event(
+            AssetMaterialization(
+                asset_key=["supabase", "reviews_table"],
+                description="Reviews table updated by ingestion pipeline",
+                metadata={
+                    "rows_inserted": inserted_count,
                 }
             )
         )

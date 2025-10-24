@@ -17,12 +17,16 @@ ENV GIT_PYTHON_REFRESH=quiet
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download PyABSA models at build time to avoid cold start delays
+# Pre-download PyABSA models and spaCy model at build time to avoid cold start delays
 RUN python -c "\
 from pyabsa import AspectTermExtraction as ATEPC; \
 print('Pre-downloading PyABSA multilingual model...'); \
 extractor = ATEPC.AspectExtractor('multilingual', auto_device=False); \
-print('Model download complete')"
+print('PyABSA model download complete'); \
+import spacy; \
+print('Downloading spaCy en_core_web_sm model...'); \
+spacy.cli.download('en_core_web_sm'); \
+print('spaCy model download complete')"
 
 # Copy application code
 COPY app/ ./app/

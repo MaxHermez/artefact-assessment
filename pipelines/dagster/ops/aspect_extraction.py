@@ -34,6 +34,7 @@ from dagster import (
     get_dagster_logger,
     Field,
     Int,
+    String,
     AssetMaterialization,
 )
 
@@ -205,6 +206,7 @@ def load_reviews_for_aspects(context: OpExecutionContext):
 
     conn = get_db_connection()
     try:
+        # Ensure table exists once before processing any batches
         _ensure_review_aspect_extractions_table(conn)
 
         with conn.cursor() as cur:
@@ -282,7 +284,6 @@ def extract_aspects_batch_via_api(context: OpExecutionContext, reviews: List[Dic
 
     api_url = os.getenv("ASPECT_API_URL", "").rstrip("/")
     api_key = os.getenv("ASPECT_API_KEY")
-    # Batch endpoint now processes items concurrently, so timeout can be reasonable
     timeout = float(os.getenv("ASPECT_API_TIMEOUT", "60"))
 
     if not api_url or not api_key:
@@ -528,6 +529,17 @@ def upsert_review_aspects(context: OpExecutionContext, batch_results: List[Dict]
                 },
             )
         )
+        
+        # Materialize the review_aspects_table asset
+        context.log_event(
+            AssetMaterialization(
+                asset_key=["supabase", "review_aspects_table"],
+                description="Review aspects table updated",
+                metadata={
+                    "rows_inserted": inserted,
+                }
+            )
+        )
         return inserted
     except Exception as e:
         conn.rollback()
@@ -535,3 +547,529 @@ def upsert_review_aspects(context: OpExecutionContext, batch_results: List[Dict]
         raise
     finally:
         conn.close()
+
+
+@op(
+    description="Process a single batch end-to-end: select reviews → call API → upsert aspects",
+    ins={"batch_num": In(int)},
+    out=Out(Dict, description="Batch processing result with stats"),
+    config_schema={
+        "batch_size": Field(Int, description="Number of reviews per batch", default_value=200),
+    },
+)
+def process_batch_end_to_end(context: OpExecutionContext, batch_num: int) -> Dict:
+    """Process a single batch as a complete unit: load → extract → persist.
+    
+    Each batch is independently retriable and observable.
+    """
+    logger = get_dagster_logger()
+    batch_size: int = context.op_config.get("batch_size", 200)
+    offset = batch_num * batch_size
+    
+    # Step 1: Select reviews for this batch
+    logger.info(f"Batch {batch_num}: Loading reviews (offset={offset}, limit={batch_size})")
+    conn = get_db_connection()
+    reviews = []
+    try:
+        # Table already created in generate_batch_numbers - no table operations here
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id, COALESCE(r.translated_content, r.content) AS text
+                FROM reviews r
+                WHERE COALESCE(r.translated_content, r.content) IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM review_aspect_extractions rae 
+                    WHERE rae.review_id = r.id 
+                    AND rae.approach = 'llm'
+                )
+                ORDER BY r.id
+                LIMIT %s OFFSET %s
+                """,
+                (batch_size, offset),
+            )
+            rows = cur.fetchall()
+            reviews = [{"id": row[0], "text": row[1]} for row in rows]
+    except Exception as e:
+        logger.error(f"Batch {batch_num}: Failed to load reviews: {e}")
+        raise
+    finally:
+        conn.close()
+    
+    if not reviews:
+        logger.info(f"Batch {batch_num}: No reviews to process")
+        return {
+            "batch_num": batch_num,
+            "reviews_loaded": 0,
+            "aspects_inserted": 0,
+            "status": "empty"
+        }
+    
+    logger.info(f"Batch {batch_num}: Loaded {len(reviews)} reviews")
+    
+    # Step 2: Call aspect extraction API
+    logger.info(f"Batch {batch_num}: Calling aspect extraction API")
+    api_url = os.getenv("ASPECT_API_URL", "").rstrip("/")
+    api_key = os.getenv("ASPECT_API_KEY")
+    timeout = float(os.getenv("ASPECT_API_TIMEOUT", "60"))
+    
+    if not api_url or not api_key:
+        raise RuntimeError("ASPECT_API_URL and ASPECT_API_KEY must be set")
+    
+    batch_endpoint = f"{api_url}/extract-batch"
+    headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+    results = []
+    
+    # Chunk reviews into batches of 32 (API limit)
+    chunk_size = 32
+    with httpx.Client(timeout=timeout) as client:
+        for i in range(0, len(reviews), chunk_size):
+            chunk = reviews[i:i + chunk_size]
+            chunk_num = i // chunk_size
+            logger.info(f"Batch {batch_num}, chunk {chunk_num + 1}/{(len(reviews) + chunk_size - 1) // chunk_size}: Processing {len(chunk)} reviews")
+            
+            items = []
+            for row in chunk:
+                items.append({
+                    "id": str(row.get("id")),
+                    "text": row.get("text", ""),
+                    "options": {"max_aspects": 10, "language": "en"}
+                })
+            
+            payload = {"items": items}
+            
+            try:
+                resp = client.post(batch_endpoint, json=payload, headers=headers)
+                resp.raise_for_status()
+                body = resp.json()
+                
+                for item in body.get("items", []):
+                    orig = next((r for r in chunk if str(r.get("id")) == str(item.get("id"))), {})
+                    results.append({
+                        "id": item.get("id"),
+                        "aspects": item.get("aspects", []),
+                        "meta": item.get("meta", {}),
+                        "text": orig.get("text", ""),
+                    })
+            except Exception as e:
+                logger.error(f"Batch {batch_num}, chunk {chunk_num + 1}: API call failed: {e}")
+                for row in chunk:
+                    results.append({
+                        "id": row.get("id"),
+                        "aspects": [],
+                        "meta": {"error": str(e)},
+                        "text": row.get("text", ""),
+                    })
+    
+    logger.info(f"Batch {batch_num}: API calls completed, got {len(results)} results")
+    
+    # Step 3: Upsert aspects to database
+    logger.info(f"Batch {batch_num}: Upserting aspects")
+    time.sleep(1)  # Rate limiting
+    
+    rows_to_insert = []
+    for item in results:
+        review_id = item.get("id")
+        source_text = item.get("text") or ""
+        meta = item.get("meta") or {}
+        model_name = meta.get("model") if isinstance(meta, dict) else None
+        inferred_approach = (
+            "pyabsa" if (isinstance(model_name, str) and "pyabsa" in model_name.lower()) else "llm"
+        )
+        for a in item.get("aspects", []) or []:
+            aspect = a.get("aspect")
+            evidence = (a.get("evidence_span") or "").strip()
+            
+            if not aspect or not aspect.strip():
+                continue
+            
+            start_idx = None
+            end_idx = None
+            if evidence and source_text:
+                idx = source_text.find(evidence)
+                if idx == -1:
+                    idx = source_text.lower().find(evidence.lower())
+                if idx != -1:
+                    start_idx = idx
+                    end_idx = idx + len(evidence)
+            
+            rows_to_insert.append({
+                "review_id": review_id,
+                "aspect": aspect.strip(),
+                "category": None,
+                "evidence_span": evidence,
+                "start_idx": start_idx,
+                "end_idx": end_idx,
+                "confidence": a.get("confidence"),
+                "model": model_name,
+                "prompt_version": meta.get("prompt_version") if isinstance(meta, dict) else None,
+                "polarity": a.get("polarity"),
+                "approach": inferred_approach,
+            })
+    
+    logger.info(f"Batch {batch_num}: Prepared {len(rows_to_insert)} rows to insert")
+    
+    inserted = 0
+    if rows_to_insert:
+        conn = get_db_connection()
+        try:
+            # Table already created in generate_batch_numbers
+            with conn.cursor() as cur:
+                insert_sql = """
+                    INSERT INTO review_aspect_extractions (
+                        review_id, aspect, category, evidence_span,
+                        start_idx, end_idx, confidence, model, prompt_version, polarity, approach
+                    ) VALUES (
+                        %(review_id)s, %(aspect)s, %(category)s, %(evidence_span)s,
+                        %(start_idx)s, %(end_idx)s, %(confidence)s, %(model)s, %(prompt_version)s, %(polarity)s, %(approach)s
+                    )
+                    ON CONFLICT DO NOTHING
+                """
+                execute_batch(cur, insert_sql, rows_to_insert, page_size=500)
+                conn.commit()
+            inserted = len(rows_to_insert)
+            logger.info(f"Batch {batch_num}: Inserted up to {inserted} aspect rows")
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Batch {batch_num}: Failed to upsert aspects: {e}")
+            raise
+        finally:
+            conn.close()
+    else:
+        logger.warning(f"Batch {batch_num}: No rows to insert - API returned no aspects")
+    
+    result = {
+        "batch_num": batch_num,
+        "reviews_loaded": len(reviews),
+        "aspects_inserted": inserted,
+        "status": "success"
+    }
+    
+    context.log_event(
+        AssetMaterialization(
+            asset_key=f"aspect_batch_{batch_num}",
+            description=f"Processed batch {batch_num} end-to-end",
+            metadata=result,
+        )
+    )
+    
+    # Materialize the review_aspects_table asset
+    context.log_event(
+        AssetMaterialization(
+            asset_key=["supabase", "review_aspects_table"],
+            description="Review aspects table updated by aspect extraction pipeline",
+            metadata={
+                "batch_num": batch_num,
+                "rows_inserted": inserted,
+            }
+        )
+    )
+    
+    logger.info(f"Batch {batch_num}: Complete - {result}")
+    return result
+
+
+@op(
+    description="Generate batch numbers for dynamic mapping",
+    out=DynamicOut(int, description="Batch number for processing"),
+    config_schema={
+        "batch_size": Field(Int, description="Number of reviews per batch", default_value=200),
+        "approach": Field(String, description="Extraction approach to filter by (llm or pyabsa)", default_value="llm"),
+    },
+)
+def generate_batch_numbers(context: OpExecutionContext):
+    """Count reviews needing extraction and yield batch numbers for dynamic mapping."""
+    logger = get_dagster_logger()
+    batch_size: int = context.op_config.get("batch_size", 200)
+    approach: str = context.op_config.get("approach", "llm")
+    
+    conn = get_db_connection()
+    try:
+        # Ensure table exists once BEFORE creating any batches to avoid deadlocks
+        _ensure_review_aspect_extractions_table(conn)
+        
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM reviews r
+                WHERE COALESCE(r.translated_content, r.content) IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM review_aspect_extractions rae 
+                    WHERE rae.review_id = r.id 
+                    AND rae.approach = %s
+                )
+                """,
+                (approach,)
+            )
+            total_count = cur.fetchone()[0]
+    except Exception as e:
+        logger.error(f"Failed to count reviews: {e}")
+        raise
+    finally:
+        conn.close()
+    
+    num_batches = (total_count + batch_size - 1) // batch_size
+    logger.info(f"Found {total_count} reviews needing {approach} extraction, creating {num_batches} batches of size {batch_size}")
+    
+    for batch_num in range(num_batches):
+        yield DynamicOutput(batch_num, mapping_key=f"batch_{batch_num}")
+    
+    context.log_event(
+        AssetMaterialization(
+            asset_key="aspect_extraction_batches",
+            description="Generated batch numbers for aspect extraction",
+            metadata={
+                "total_reviews": total_count,
+                "batch_size": batch_size,
+                "num_batches": num_batches,
+            },
+        )
+    )
+
+
+@op(
+    description="Process a single batch end-to-end using PyABSA: select reviews → call API → upsert aspects",
+    ins={"batch_num": In(int)},
+    out=Out(Dict, description="Batch processing result with stats"),
+    config_schema={
+        "batch_size": Field(Int, description="Number of reviews per batch", default_value=200),
+    },
+)
+def process_batch_end_to_end_pyabsa(context: OpExecutionContext, batch_num: int) -> Dict:
+    """Process a single batch as a complete unit using PyABSA: load → extract → persist.
+    
+    Each batch is independently retriable and observable.
+    """
+    logger = get_dagster_logger()
+    batch_size: int = context.op_config.get("batch_size", 200)
+    offset = batch_num * batch_size
+    
+    # Step 1: Select reviews for this batch
+    logger.info(f"Batch {batch_num}: Loading reviews (offset={offset}, limit={batch_size})")
+    conn = get_db_connection()
+    reviews = []
+    try:
+        # Table already created in generate_batch_numbers - no table operations here
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id, COALESCE(r.translated_content, r.content) AS text
+                FROM reviews r
+                WHERE COALESCE(r.translated_content, r.content) IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM review_aspect_extractions rae 
+                    WHERE rae.review_id = r.id 
+                    AND rae.approach = 'pyabsa'
+                )
+                ORDER BY r.id
+                LIMIT %s OFFSET %s
+                """,
+                (batch_size, offset),
+            )
+            rows = cur.fetchall()
+            reviews = [{"id": row[0], "text": row[1]} for row in rows]
+    except Exception as e:
+        logger.error(f"Batch {batch_num}: Failed to load reviews: {e}")
+        raise
+    finally:
+        conn.close()
+    
+    if not reviews:
+        logger.info(f"Batch {batch_num}: No reviews to process")
+        return {
+            "batch_num": batch_num,
+            "reviews_loaded": 0,
+            "aspects_inserted": 0,
+            "status": "empty"
+        }
+    
+    logger.info(f"Batch {batch_num}: Loaded {len(reviews)} reviews")
+    
+    # Step 2: Call PyABSA aspect extraction API
+    logger.info(f"Batch {batch_num}: Calling PyABSA aspect extraction API")
+    api_url = os.getenv("PYABSA_API_URL", "").rstrip("/")
+    api_key = os.getenv("PYABSA_API_KEY")
+    timeout = float(os.getenv("PYABSA_API_TIMEOUT", "60"))
+    
+    if not api_url or not api_key:
+        raise RuntimeError("PYABSA_API_URL and PYABSA_API_KEY must be set")
+    
+    # Ensure we hit the batch endpoint
+    if not api_url.endswith("extract-batch"):
+        api_url = api_url + "/extract-batch"
+    
+    headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+    results = []
+    
+    # Chunk reviews into batches of 32 (API limit)
+    chunk_size = 32
+    with httpx.Client(timeout=timeout) as client:
+        for i in range(0, len(reviews), chunk_size):
+            chunk = reviews[i:i + chunk_size]
+            chunk_num = i // chunk_size
+            
+            # Add small delay between chunks to avoid overwhelming Cloud Run instances
+            # This prevents all batches from hitting the API simultaneously
+            if chunk_num > 0:
+                time.sleep(2)  # 2 second delay between chunks within same batch
+            
+            logger.info(f"Batch {batch_num}, chunk {chunk_num + 1}/{(len(reviews) + chunk_size - 1) // chunk_size}: Processing {len(chunk)} reviews")
+            
+            items = [{"id": str(row.get("id")), "text": row.get("text", "")} for row in chunk]
+            payload = {"items": items}
+            
+            # Retry logic for 429/500 errors (cold start issues)
+            max_retries = 3
+            retry_delay = 10  # seconds
+            
+            for attempt in range(max_retries):
+                try:
+                    resp = client.post(api_url, json=payload, headers=headers)
+                    resp.raise_for_status()
+                    body = resp.json()
+                    
+                    for item in body.get("items", []):
+                        orig = next((r for r in chunk if str(r.get("id")) == str(item.get("id"))), {})
+                        results.append({
+                            "id": item.get("id"),
+                            "aspects": item.get("aspects", []),
+                            "meta": item.get("meta", {}),
+                            "text": orig.get("text", ""),
+                        })
+                    break  # Success, exit retry loop
+                    
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code in [429, 500, 503] and attempt < max_retries - 1:
+                        logger.warning(f"Batch {batch_num}, chunk {chunk_num + 1}: Got {e.response.status_code}, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        logger.error(f"Batch {batch_num}, chunk {chunk_num + 1}: API call failed after {attempt + 1} attempts: {e}")
+                        # Return empty results for failed chunk
+                        for row in chunk:
+                            results.append({
+                                "id": row.get("id"),
+                                "aspects": [],
+                                "meta": {"error": str(e)},
+                                "text": row.get("text", ""),
+                            })
+                        break
+                        
+                except Exception as e:
+                    logger.error(f"Batch {batch_num}, chunk {chunk_num + 1}: Unexpected error: {e}")
+                    for row in chunk:
+                        results.append({
+                            "id": row.get("id"),
+                            "aspects": [],
+                            "meta": {"error": str(e)},
+                            "text": row.get("text", ""),
+                        })
+                    break  # Exit retry loop on unexpected error
+    
+    logger.info(f"Batch {batch_num}: API calls completed, got {len(results)} results")
+    
+    # Step 3: Upsert aspects to database
+    logger.info(f"Batch {batch_num}: Upserting aspects")
+    time.sleep(1)  # Rate limiting
+    
+    rows_to_insert = []
+    for item in results:
+        review_id = item.get("id")
+        source_text = item.get("text") or ""
+        meta = item.get("meta") or {}
+        model_name = meta.get("model") if isinstance(meta, dict) else None
+        inferred_approach = (
+            "pyabsa" if (isinstance(model_name, str) and "pyabsa" in model_name.lower()) else "llm"
+        )
+        for a in item.get("aspects", []) or []:
+            aspect = a.get("aspect")
+            evidence = (a.get("evidence_span") or "").strip()
+            
+            if not aspect or not aspect.strip():
+                continue
+            
+            start_idx = None
+            end_idx = None
+            if evidence and source_text:
+                idx = source_text.find(evidence)
+                if idx == -1:
+                    idx = source_text.lower().find(evidence.lower())
+                if idx != -1:
+                    start_idx = idx
+                    end_idx = idx + len(evidence)
+            
+            rows_to_insert.append({
+                "review_id": review_id,
+                "aspect": aspect.strip(),
+                "category": None,
+                "evidence_span": evidence,
+                "start_idx": start_idx,
+                "end_idx": end_idx,
+                "confidence": a.get("confidence"),
+                "model": model_name,
+                "prompt_version": meta.get("prompt_version") if isinstance(meta, dict) else None,
+                "polarity": a.get("polarity"),
+                "approach": inferred_approach,
+            })
+    
+    logger.info(f"Batch {batch_num}: Prepared {len(rows_to_insert)} rows to insert")
+    
+    inserted = 0
+    if rows_to_insert:
+        conn = get_db_connection()
+        try:
+            # Table already created in generate_batch_numbers
+            with conn.cursor() as cur:
+                insert_sql = """
+                    INSERT INTO review_aspect_extractions (
+                        review_id, aspect, category, evidence_span,
+                        start_idx, end_idx, confidence, model, prompt_version, polarity, approach
+                    ) VALUES (
+                        %(review_id)s, %(aspect)s, %(category)s, %(evidence_span)s,
+                        %(start_idx)s, %(end_idx)s, %(confidence)s, %(model)s, %(prompt_version)s, %(polarity)s, %(approach)s
+                    )
+                    ON CONFLICT DO NOTHING
+                """
+                execute_batch(cur, insert_sql, rows_to_insert, page_size=500)
+                conn.commit()
+            inserted = len(rows_to_insert)
+            logger.info(f"Batch {batch_num}: Inserted up to {inserted} aspect rows")
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Batch {batch_num}: Failed to upsert aspects: {e}")
+            raise
+        finally:
+            conn.close()
+    else:
+        logger.warning(f"Batch {batch_num}: No rows to insert - API returned no aspects")
+    
+    result = {
+        "batch_num": batch_num,
+        "reviews_loaded": len(reviews),
+        "aspects_inserted": inserted,
+        "status": "success"
+    }
+    
+    context.log_event(
+        AssetMaterialization(
+            asset_key=f"pyabsa_batch_{batch_num}",
+            description=f"Processed batch {batch_num} end-to-end with PyABSA",
+            metadata=result,
+        )
+    )
+    
+    # Materialize the review_aspects_table asset
+    context.log_event(
+        AssetMaterialization(
+            asset_key=["supabase", "review_aspects_table"],
+            description="Review aspects table updated by PyABSA extraction pipeline",
+            metadata={
+                "batch_num": batch_num,
+                "rows_inserted": inserted,
+            }
+        )
+    )
+    
+    logger.info(f"Batch {batch_num}: Complete - {result}")
+    return result

@@ -186,6 +186,17 @@ def update_parsed_reviews(context: OpExecutionContext, parsed_reviews: List[Dict
             )
         )
         
+        # Materialize the reviews_table asset
+        context.log_event(
+            AssetMaterialization(
+                asset_key=["supabase", "reviews_table"],
+                description="Reviews table updated by parsing pipeline",
+                metadata={
+                    "rows_updated": updated_count,
+                }
+            )
+        )
+        
         return updated_count
         
     except Exception as e:

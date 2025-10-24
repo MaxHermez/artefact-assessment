@@ -30,7 +30,6 @@ logger = logging.getLogger(__name__)
 
 # Global extractor instance and load state
 extractor = None
-_model_load_started = False
 _model_load_error: Optional[str] = None
 
 def load_pyabsa_model():
@@ -46,28 +45,15 @@ def load_pyabsa_model():
     except Exception as e:
         _model_load_error = str(e)
         logger.error(f"Failed to load PyABSA model: {e}", exc_info=True)
-
-def _start_model_load_in_background():
-    """Kick off model loading in a background thread to avoid blocking server startup."""
-    global _model_load_started
-    if _model_load_started:
-        return
-    _model_load_started = True
-
-    def _target():
-        try:
-            load_pyabsa_model()
-        except Exception:
-            # error already logged inside load_pyabsa_model
-            pass
-
-    Thread(target=_target, daemon=True).start()
+        raise  # Fail startup if model doesn't load
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Handle application startup and shutdown without blocking port binding."""
-    # Startup: start model loading in background so the server can bind to the PORT quickly
-    _start_model_load_in_background()
+    """Handle application startup and shutdown - loads model synchronously."""
+    # Startup: load model BEFORE accepting any traffic
+    logger.info("Starting PyABSA API - loading model synchronously...")
+    load_pyabsa_model()
+    logger.info("PyABSA API ready to accept requests")
     yield
     # Shutdown
     logger.info("Application shutting down")
@@ -251,8 +237,15 @@ def process_single_text(text: str, text_id: str) -> SingleExtractResponse:
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
+    if extractor is not None:
+        status = "healthy"
+    elif _model_load_error:
+        status = "error"
+    else:
+        status = "starting"
+    
     return {
-        "status": ("healthy" if extractor is not None else ("error" if _model_load_error else "starting")),
+        "status": status,
         "model_loaded": extractor is not None,
         "model_error": _model_load_error,
         "timestamp": int(time.time())

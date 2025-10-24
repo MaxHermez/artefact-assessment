@@ -17,7 +17,22 @@ def get_gcs_client():
 
 
 def get_db_connection():
-    """Create a connection to the Supabase PostgreSQL database."""
+    """
+    Create a connection to the Supabase PostgreSQL database.
+    
+    DEPRECATED: Use the 'database' resource instead for new code.
+    This function is kept for backward compatibility during migration.
+    
+    Example migration:
+        # Old way:
+        conn = get_db_connection()
+        
+        # New way (in ops/assets):
+        @op(required_resource_keys={"database"})
+        def my_op(context):
+            with context.resources.database.get_connection() as conn:
+                # use conn
+    """
     return psycopg2.connect(
         host=os.getenv('SUPABASE_DB_HOST'),
         port=int(os.getenv('SUPABASE_DB_PORT', 6543)),

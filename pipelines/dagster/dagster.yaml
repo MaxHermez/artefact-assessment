@@ -1,8 +1,8 @@
-# Use SQLite for local development (simpler setup)
-# For production, you'd use PostgreSQL
+# Use PostgreSQL for better concurrency support
 storage:
-  sqlite:
-    base_dir: /opt/dagster/dagster_home/storage
+  postgres:
+    postgres_url:
+      env: DAGSTER_PG_URL
 
 run_launcher:
   module: dagster.core.launcher
